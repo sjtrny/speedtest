@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Speed test</title>
+</head>
+<body>
+  <h1>Speed test</h1>
+  <p>Latency: <output id="latency">—</output> ms</p>
+  <p>Download: <output id="download">—</output> Mbps</p>
+  <p>Upload: <output id="upload">—</output> Mbps</p>
+  <button id="start">Start</button>
+
+  <script>
+    const STREAMS = 4;
+    const DURATION = 8000;
+    const button = document.querySelector("#start");
+    const latencyOutput = document.querySelector("#latency");
+    const downloadOutput = document.querySelector("#download");
+    const uploadOutput = document.querySelector("#upload");
+
+    const rate = (bytes, milliseconds) => bytes * 8 / milliseconds / 1000;
+    const show = (output, value) => { output.value = value.toFixed(1); };
+
+    async function ping() {
+      const started = performance.now();
+      const response = await fetch("./ping");
+      if (!response.ok) throw new Error("Ping failed");
+      return performance.now() - started;
+    }
+
+    async function testLatency() {
+      await ping();
+      const samples = [];
+      for (let i = 0; i < 5; i++) {
+        samples.push(await ping());
+        show(latencyOutput, samples.at(-1));
+      }
+      samples.sort((a, b) => a - b);
+      show(latencyOutput, samples[2]);
+    }
+
+    async function downloadPass(milliseconds) {
+      const started = performance.now();
+      const controller = new AbortController();
+      let bytes = 0;
+
+      const timer = setTimeout(() => controller.abort(), milliseconds);
+      const live = setInterval(
+        () => show(downloadOutput, rate(bytes, performance.now() - started)),
+        250,
+      );
+
+      async function worker() {
+        try {
+          const response = await fetch("./download", {
+            signal: controller.signal,
+          });
+          if (!response.ok || !response.body) throw new Error("Download failed");
+          const reader = response.body.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            bytes += value.length;
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) throw error;
+        }
+      }
+
+      try {
+        await Promise.all(Array.from({ length: STREAMS }, worker));
+      } finally {
+        clearTimeout(timer);
+        clearInterval(live);
+        controller.abort();
+      }
+      show(downloadOutput, rate(bytes, performance.now() - started));
+    }
+
+    async function uploadPass(milliseconds, body) {
+      const started = performance.now();
+      const active = new Set();
+      let bytes = 0;
+      let stopped = false;
+      let ended;
+
+      function stop() {
+        if (stopped) return;
+        stopped = true;
+        ended = performance.now();
+        for (const request of active) request.abort();
+      }
+
+      const timer = setTimeout(stop, milliseconds);
+      const live = setInterval(
+        () => show(uploadOutput, rate(bytes, performance.now() - started)),
+        250,
+      );
+
+      function send() {
+        return new Promise((resolve, reject) => {
+          const request = new XMLHttpRequest();
+          let sent = 0;
+          active.add(request);
+          request.open("POST", "./upload");
+
+          request.upload.onprogress = request.upload.onload = event => {
+            bytes += event.loaded - sent;
+            sent = event.loaded;
+          };
+          const finish = error => {
+            active.delete(request);
+            error ? reject(error) : resolve();
+          };
+          request.onload = () => finish(
+            request.status === 204 ? null : new Error("Upload failed"),
+          );
+          request.onerror = () => finish(
+            stopped ? null : new Error("Upload failed"),
+          );
+          request.onabort = () => finish();
+          request.send(body);
+        });
+      }
+
+      async function worker() {
+        while (!stopped) await send();
+      }
+
+      try {
+        await Promise.all(Array.from({ length: STREAMS }, worker));
+      } finally {
+        clearTimeout(timer);
+        clearInterval(live);
+        stop();
+      }
+      show(uploadOutput, rate(bytes, ended - started));
+    }
+
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      latencyOutput.value = downloadOutput.value = uploadOutput.value = "—";
+      try {
+        await testLatency();
+        await downloadPass(DURATION);
+
+        const body = new Blob([new Uint8Array(32 * 1024 * 1024)]);
+        await uploadPass(DURATION, body);
+      } catch (error) {
+        alert(error.message || "Test failed");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
