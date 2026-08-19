@@ -2,7 +2,7 @@
 
 Minimal browser-based latency, download, and upload test to your server.
 
-![Speed test running](screenshot.png)
+![Speed test running](screenshot.gif)
 
 ## Run
 
