@@ -69,11 +69,3 @@ must measure separate TCP connections.
 
 The maximum is six connections to fit common HTTP/1.1 browser limits. The
 browser, operating system, and reverse proxy still control connection reuse.
-
-## Development
-
-Run the dependency-free regression tests with Node.js:
-
-```sh
-node --test tests/speedtest.test.js
-```
