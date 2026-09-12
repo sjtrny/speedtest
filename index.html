@@ -65,66 +65,52 @@
   <script>
     const SAMPLE_INTERVAL = 250;
     const MINIMUM_GAIN = 0.08;
-    const form = document.querySelector("#test-form");
-    const settings = document.querySelector("#settings");
-    const autoSettings = document.querySelector("#auto-settings");
-    const button = document.querySelector("#start");
-    const modeSelect = document.querySelector("#mode");
-    const minConnectionsInput = document.querySelector("#min-connections");
-    const maxConnectionsInput = document.querySelector("#max-connections");
-    const latencyOutput = document.querySelector("#latency");
-    const downloadOutput = document.querySelector("#download");
-    const uploadOutput = document.querySelector("#upload");
-    const downloadConnectionsOutput = document.querySelector("#download-connections");
-    const uploadConnectionsOutput = document.querySelector("#upload-connections");
-    const statusOutput = document.querySelector("#status");
+    const $ = selector => document.querySelector(selector);
+    const form = $("#test-form");
+    const settings = $("#settings");
+    const autoSettings = $("#auto-settings");
+    const button = $("#start");
+    const mode = $("#mode");
+    const minConnections = $("#min-connections");
+    const maxConnections = $("#max-connections");
+    const latencyOutput = $("#latency");
+    const statusOutput = $("#status");
 
     const rate = (bytes, milliseconds) => bytes * 8 / milliseconds / 1000;
     const show = (output, value) => { output.value = value.toFixed(1); };
     const connectionLabel = count => `${count} connection${count === 1 ? "" : "s"}`;
     let requestNumber = 0;
-    const nonce = () => `${Date.now()}-${requestNumber++}-${Math.random()}`;
+    const endpoint = path => `${path}?_=${Date.now()}-${requestNumber++}`;
 
-    function validateConnections() {
-      maxConnectionsInput.setCustomValidity(
-        modeSelect.value === "auto"
-          && minConnectionsInput.valueAsNumber > maxConnectionsInput.valueAsNumber
-          ? "Maximum connections must be at least the minimum."
-          : "",
-      );
+    function updateSettings() {
+      autoSettings.disabled = mode.value === "single";
+      maxConnections.min = minConnections.value;
     }
 
-    modeSelect.addEventListener("change", () => {
-      autoSettings.disabled = modeSelect.value === "single";
-      validateConnections();
-    });
-    minConnectionsInput.addEventListener("input", validateConnections);
-    maxConnectionsInput.addEventListener("input", validateConnections);
+    mode.addEventListener("change", updateSettings);
+    minConnections.addEventListener("input", updateSettings);
+    updateSettings();
 
     function readConfig() {
-      const milliseconds = id => document.querySelector(id).valueAsNumber * 1000;
+      const milliseconds = id => $(`#${id}`).valueAsNumber * 1000;
+      const timing = direction => ({
+        warmup: milliseconds(`${direction}-warmup`),
+        duration: milliseconds(`${direction}-duration`),
+      });
       return {
-        mode: modeSelect.value,
-        minConnections: minConnectionsInput.valueAsNumber,
-        maxConnections: maxConnectionsInput.valueAsNumber,
-        download: {
-          warmup: milliseconds("#download-warmup"),
-          duration: milliseconds("#download-duration"),
-        },
-        upload: {
-          warmup: milliseconds("#upload-warmup"),
-          duration: milliseconds("#upload-duration"),
-        },
+        mode: mode.value,
+        minConnections: minConnections.valueAsNumber,
+        maxConnections: maxConnections.valueAsNumber,
+        download: timing("download"),
+        upload: timing("upload"),
       };
     }
 
     function median(values) {
       if (!values.length) return 0;
-      const sorted = [...values].sort((a, b) => a - b);
-      const middle = Math.floor(sorted.length / 2);
-      return sorted.length % 2
-        ? sorted[middle]
-        : (sorted[middle - 1] + sorted[middle]) / 2;
+      values.sort((a, b) => a - b);
+      const middle = values.length / 2;
+      return (values[Math.floor(middle)] + values[Math.ceil(middle) - 1]) / 2;
     }
 
     function sampleMedian(samples, start, end) {
@@ -135,9 +121,7 @@
 
     async function ping() {
       const started = performance.now();
-      const url = new URL("./ping", location.href);
-      url.searchParams.set("_", nonce());
-      const response = await fetch(url, { cache: "no-store" });
+      const response = await fetch(endpoint("./ping"), { cache: "no-store" });
       if (!response.ok) throw new Error("Ping failed");
       return performance.now() - started;
     }
@@ -146,61 +130,56 @@
       await ping();
       const samples = [];
       for (let i = 0; i < 5; i++) {
-        samples.push(await ping());
-        show(latencyOutput, samples.at(-1));
+        const sample = await ping();
+        samples.push(sample);
+        show(latencyOutput, sample);
       }
-      samples.sort((a, b) => a - b);
-      show(latencyOutput, samples[2]);
+      show(latencyOutput, median(samples));
     }
 
-    function downloadWorker(addBytes, fail) {
-      const controller = new AbortController();
+    function managedWorker(run, cancel, fail) {
       let stopped = false;
-      const url = new URL("./download", location.href);
-      url.searchParams.set("_", nonce());
-
-      const done = (async () => {
-        try {
-          const response = await fetch(url, {
-            cache: "no-store",
-            signal: controller.signal,
-          });
-          if (!response.ok || !response.body) throw new Error("Download failed");
-          const reader = response.body.getReader();
-          while (true) {
-            const { done: ended, value } = await reader.read();
-            if (ended) break;
-            addBytes(value.length);
-          }
-          if (!stopped) throw new Error("Download ended early");
-        } catch (error) {
-          if (!stopped && error.name !== "AbortError") fail(error);
-        }
-      })();
+      const done = run(() => stopped).catch(error => {
+        if (!stopped && error.name !== "AbortError") fail(error);
+      });
 
       return {
         done,
         stop() {
           if (stopped) return;
           stopped = true;
-          controller.abort();
+          cancel();
         },
       };
     }
 
-    function uploadWorker(body, addBytes, fail) {
-      let stopped = false;
-      let activeRequest;
+    function downloadWorker(addBytes, fail) {
+      const controller = new AbortController();
+      return managedWorker(async stopped => {
+        const response = await fetch(endpoint("./download"), {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok || !response.body) throw new Error("Download failed");
+        const reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          addBytes(value.length);
+        }
+        if (!stopped()) throw new Error("Download ended early");
+      }, () => controller.abort(), fail);
+    }
 
-      function send() {
-        return new Promise((resolve, reject) => {
+    function uploadWorker(body, addBytes, fail) {
+      let activeRequest;
+      return managedWorker(async stopped => {
+        while (!stopped()) await new Promise((resolve, reject) => {
           const request = new XMLHttpRequest();
-          const url = new URL("./upload", location.href);
-          url.searchParams.set("_", nonce());
           let sent = 0;
           let settled = false;
           activeRequest = request;
-          request.open("POST", url);
+          request.open("POST", endpoint("./upload"));
 
           request.upload.onprogress = request.upload.onload = event => {
             addBytes(event.loaded - sent);
@@ -210,84 +189,56 @@
             if (settled) return;
             settled = true;
             if (activeRequest === request) activeRequest = undefined;
-            error ? reject(error) : resolve();
+            (error ? reject : resolve)(error);
           };
           request.onload = () => finish(
             request.status === 204 ? null : new Error("Upload failed"),
           );
           request.onerror = () => finish(
-            stopped ? null : new Error("Upload failed"),
+            stopped() ? null : new Error("Upload failed"),
           );
           request.onabort = () => finish();
           request.send(body);
         });
-      }
-
-      const done = (async () => {
-        try {
-          while (!stopped) await send();
-        } catch (error) {
-          if (!stopped) fail(error);
-        }
-      })();
-
-      return {
-        done,
-        stop() {
-          if (stopped) return;
-          stopped = true;
-          activeRequest?.abort();
-        },
-      };
+      }, () => activeRequest?.abort(), fail);
     }
 
     async function throughputPass(name, output, connectionsOutput, config, timing, createWorker) {
       const started = performance.now();
       const probeStart = timing.warmup / 3;
       const probeEnd = probeStart * 2;
-      let bytes = 0;
-      let failure;
-      let rejectFailure;
-      const failed = new Promise((_, reject) => { rejectFailure = reject; });
-      failed.catch(() => {});
       const activeWorkers = new Set();
       const allWorkers = [];
       const samples = [];
+      let bytes = 0;
+      let rejectFailure;
       let lastSampledAt = started;
       let lastSampledBytes = 0;
       let sampleTimer;
-
-      function stopAll() {
-        for (const worker of activeWorkers) worker.stop();
-        activeWorkers.clear();
-      }
-
-      function fail(error) {
-        if (failure) return;
-        failure = error;
-        stopAll();
-        rejectFailure(error);
-      }
-
-      function addWorkers(count) {
-        const added = [];
-        for (let i = 0; i < count; i++) {
-          const worker = createWorker(
-            amount => { bytes += amount; },
-            fail,
-          );
-          activeWorkers.add(worker);
-          allWorkers.push(worker);
-          added.push(worker);
-        }
-        return added;
-      }
+      const failure = new Promise((_, reject) => { rejectFailure = reject; });
 
       function stopWorkers(workers) {
         for (const worker of workers) {
           worker.stop();
           activeWorkers.delete(worker);
         }
+      }
+
+      function fail(error) {
+        stopWorkers(activeWorkers);
+        rejectFailure(error);
+      }
+
+      function addWorkers(count) {
+        return Array.from({ length: count }, () => {
+          const worker = createWorker(
+            amount => { bytes += amount; },
+            fail,
+          );
+          activeWorkers.add(worker);
+          allWorkers.push(worker);
+          return worker;
+        });
       }
 
       function sample() {
@@ -300,36 +251,27 @@
         show(output, median(samples.slice(-4).map(item => item.mbps)));
       }
 
-      async function waitUntil(deadline) {
+      function waitUntil(deadline) {
         let timer;
-        try {
-          await Promise.race([
-            new Promise(resolve => {
-              timer = setTimeout(resolve, Math.max(0, deadline - performance.now()));
-            }),
-            failed,
-          ]);
-        } finally {
-          clearTimeout(timer);
-        }
+        const timeout = new Promise(resolve => {
+          timer = setTimeout(resolve, Math.max(0, deadline - performance.now()));
+        });
+        return Promise.race([timeout, failure]).finally(() => clearTimeout(timer));
       }
 
-      const initialConnections = config.mode === "single"
-        ? 1
-        : config.minConnections;
+      const initialConnections = config.mode === "single" ? 1 : config.minConnections;
       let selectedConnections = initialConnections;
 
-      statusOutput.value = timing.warmup > 0
-        ? `${name} warm-up…`
-        : `${name}…`;
+      statusOutput.value = `${name}${timing.warmup ? " warm-up" : ""}…`;
       connectionsOutput.value = connectionLabel(initialConnections);
 
       try {
         addWorkers(initialConnections);
         sampleTimer = setInterval(sample, SAMPLE_INTERVAL);
-        if (config.mode === "auto"
+        if (timing.warmup > 0
+          && config.mode === "auto"
           && config.maxConnections > initialConnections
-          && timing.warmup > 0) {
+        ) {
           await waitUntil(started + probeStart);
           sample();
           const baseline = sampleMedian(samples, probeStart / 2, probeStart);
@@ -351,7 +293,7 @@
           connectionsOutput.value = connectionLabel(selectedConnections);
         }
 
-        if (timing.warmup > 0) await waitUntil(started + timing.warmup);
+        if (timing.warmup) await waitUntil(started + timing.warmup);
         statusOutput.value = `${name}…`;
         const scoreStarted = performance.now();
         const scoreBytes = bytes;
@@ -368,58 +310,42 @@
         return { connections: selectedConnections, mbps: result };
       } finally {
         clearInterval(sampleTimer);
-        stopAll();
+        stopWorkers(activeWorkers);
         await Promise.allSettled(allWorkers.map(worker => worker.done));
       }
     }
 
-    async function downloadPass(config) {
+    function runPass(name, config, createWorker) {
+      const key = name.toLowerCase();
       return throughputPass(
-        "Download",
-        downloadOutput,
-        downloadConnectionsOutput,
+        name,
+        $(`#${key}`),
+        $(`#${key}-connections`),
         config,
-        config.download,
-        downloadWorker,
-      );
-    }
-
-    async function uploadPass(config, body) {
-      return throughputPass(
-        "Upload",
-        uploadOutput,
-        uploadConnectionsOutput,
-        config,
-        config.upload,
-        (addBytes, fail) => uploadWorker(body, addBytes, fail),
+        config[key],
+        createWorker,
       );
     }
 
     form.addEventListener("submit", async event => {
       event.preventDefault();
       if (button.disabled) return;
-      validateConnections();
-      if (!form.reportValidity()) return;
       const config = readConfig();
-      button.disabled = true;
-      settings.disabled = true;
-      latencyOutput.value = downloadOutput.value = uploadOutput.value = "—";
-      downloadConnectionsOutput.value = uploadConnectionsOutput.value = "—";
+      button.disabled = settings.disabled = true;
+      for (const output of document.querySelectorAll("#results output")) output.value = "—";
       statusOutput.value = "Latency…";
       try {
         await testLatency();
-        await downloadPass(config);
+        await runPass("Download", config, downloadWorker);
 
-        // Repeat this reusable chunk until the upload deadline, then abort it.
         const body = new Blob([new Uint8Array(32 * 1024 * 1024)]);
-        await uploadPass(config, body);
+        await runPass("Upload", config, (addBytes, fail) => uploadWorker(body, addBytes, fail));
         statusOutput.value = "Done";
       } catch (error) {
         statusOutput.value = "Failed";
         alert(error.message || "Test failed");
       } finally {
-        button.disabled = false;
-        settings.disabled = false;
+        button.disabled = settings.disabled = false;
       }
     });
   </script>
