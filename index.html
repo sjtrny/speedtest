@@ -80,6 +80,7 @@
     const show = (output, value) => { output.value = value.toFixed(1); };
     const connectionLabel = count => `${count} connection${count === 1 ? "" : "s"}`;
     let requestNumber = 0;
+    let runController;
     const endpoint = path => `${path}?_=${Date.now()}-${requestNumber++}`;
 
     function updateSettings() {
@@ -119,18 +120,18 @@
         .map(sample => sample.mbps));
     }
 
-    async function ping() {
+    async function ping(signal) {
       const started = performance.now();
-      const response = await fetch(endpoint("./ping"), { cache: "no-store" });
+      const response = await fetch(endpoint("./ping"), { cache: "no-store", signal });
       if (!response.ok) throw new Error("Ping failed");
       return performance.now() - started;
     }
 
-    async function testLatency() {
-      await ping();
+    async function testLatency(signal) {
+      await ping(signal);
       const samples = [];
       for (let i = 0; i < 5; i++) {
-        const sample = await ping();
+        const sample = await ping(signal);
         samples.push(sample);
         show(latencyOutput, sample);
       }
@@ -204,6 +205,8 @@
     }
 
     async function throughputPass(name, output, connectionsOutput, config, timing, createWorker) {
+      const { signal } = config;
+      signal.throwIfAborted();
       const started = performance.now();
       const probeStart = timing.warmup / 3;
       const probeEnd = probeStart * 2;
@@ -216,6 +219,7 @@
       let lastSampledBytes = 0;
       let sampleTimer;
       const failure = new Promise((_, reject) => { rejectFailure = reject; });
+      const cancel = () => fail(signal.reason);
 
       function stopWorkers(workers) {
         for (const worker of workers) {
@@ -266,6 +270,7 @@
       connectionsOutput.value = connectionLabel(initialConnections);
 
       try {
+        signal.addEventListener("abort", cancel, { once: true });
         addWorkers(initialConnections);
         sampleTimer = setInterval(sample, SAMPLE_INTERVAL);
         if (timing.warmup > 0
@@ -309,6 +314,7 @@
         show(output, result);
         return { connections: selectedConnections, mbps: result };
       } finally {
+        signal.removeEventListener("abort", cancel);
         clearInterval(sampleTimer);
         stopWorkers(activeWorkers);
         await Promise.allSettled(allWorkers.map(worker => worker.done));
@@ -329,23 +335,28 @@
 
     form.addEventListener("submit", async event => {
       event.preventDefault();
-      if (button.disabled) return;
-      const config = readConfig();
-      button.disabled = settings.disabled = true;
+      if (runController) return runController.abort();
+      runController = new AbortController();
+      const config = { ...readConfig(), signal: runController.signal };
+      button.textContent = "Cancel";
+      settings.disabled = true;
       for (const output of document.querySelectorAll("#results output")) output.value = "—";
       statusOutput.value = "Latency…";
       try {
-        await testLatency();
+        await testLatency(config.signal);
         await runPass("Download", config, downloadWorker);
 
         const body = new Blob([new Uint8Array(32 * 1024 * 1024)]);
         await runPass("Upload", config, (addBytes, fail) => uploadWorker(body, addBytes, fail));
+        config.signal.throwIfAborted();
         statusOutput.value = "Done";
       } catch (error) {
-        statusOutput.value = "Failed";
-        alert(error.message || "Test failed");
+        statusOutput.value = config.signal.aborted ? "Cancelled" : "Failed";
+        if (!config.signal.aborted) alert(error.message || "Test failed");
       } finally {
-        button.disabled = settings.disabled = false;
+        runController = null;
+        button.textContent = "Start";
+        settings.disabled = false;
       }
     });
   </script>

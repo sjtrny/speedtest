@@ -35,6 +35,8 @@ docker compose up -d
 ```
 
 Open <http://localhost:8080>, choose the settings, and select **Start**.
+Select **Cancel** to stop and keep the displayed results. Starting again clears
+the results and runs the test from the beginning.
 
 ## Test settings
 
