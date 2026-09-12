@@ -1,5 +1,5 @@
-import asyncio
 import os
+from contextlib import suppress
 from pathlib import Path
 
 from aiohttp import web
@@ -26,21 +26,18 @@ async def download(request):
             "X-Accel-Buffering": "no",
         }
     )
-    try:
+    with suppress(OSError):
         await response.prepare(request)
         while True:
             await response.write(DATA)
-    except OSError:
-        raise asyncio.CancelledError
+    return response
 
 
 async def upload(request):
-    try:
+    with suppress(OSError):
         async for _ in request.content.iter_any():
             pass
-    except OSError:
-        raise asyncio.CancelledError
-    return web.Response(status=204)
+    return web.Response(status=204, headers=NO_STORE)
 
 
 app = web.Application()
