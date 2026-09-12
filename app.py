@@ -40,7 +40,7 @@ async def upload(request):
             pass
     except OSError:
         raise asyncio.CancelledError
-    return web.Response(status=204)
+    return web.Response(status=204, headers=NO_STORE)
 
 
 app = web.Application()
