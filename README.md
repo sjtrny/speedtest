@@ -1,17 +1,17 @@
 # Speedtest
 
-Minimal browser-based latency, download, and upload test to your server.
-
-- **Auto** starts with the configured minimum connections, probes the maximum
-  during warm-up, and keeps the maximum only when it improves throughput by
-  at least 8%.
-- **Single connection** measures one transfer for comparison with workloads
-  such as media streaming and ordinary browser downloads.
-- Download and upload each have their own warm-up and measurement times.
-  Results exclude warm-up traffic. Both directions stop on a timer, not after
-  transferring a fixed amount of data.
+A small, self-hosted browser test for latency, download speed, and upload speed.
 
 ![Speed test running](screenshot.gif)
+
+## Features
+
+- **Auto** selects between configurable minimum and maximum connection counts.
+- **Single connection** measures one transfer for comparison with workloads
+  such as media streaming and browser downloads.
+- Download and upload have separate warm-up and measurement durations.
+- Tests end after the configured time, not after a fixed amount of data.
+- Warm-up traffic is excluded from the reported speed.
 
 ## Run
 
@@ -34,53 +34,46 @@ services:
 docker compose up -d
 ```
 
-Open <http://localhost:8080>, choose a mode and settings, and select **Start**.
+Open <http://localhost:8080>, choose the settings, and select **Start**.
 
 ## Test settings
 
 | Setting | Default | Allowed values |
 | --- | --- | --- |
-| Minimum Auto connections | 2 | 1–6 |
-| Maximum Auto connections | 4 | Minimum–6 |
+| Minimum connections (Auto) | 2 | 1–6 |
+| Maximum connections (Auto) | 4 | 1–6; at least the minimum |
 | Download warm-up | 6 seconds | 0–3600 seconds |
 | Upload warm-up | 6 seconds | 0–3600 seconds |
-| Download measurement | 4 seconds | 0.1–3600 seconds |
-| Upload measurement | 4 seconds | 0.1–3600 seconds |
+| Download duration | 4 seconds | 0.1–3600 seconds |
+| Upload duration | 4 seconds | 0.1–3600 seconds |
 
-Times accept tenths of a second. Each direction runs for its warm-up **plus**
-its measurement time. The defaults retain the ten-second pass per direction.
-Settings are fixed during a run and can be changed before the next run.
+Times accept tenths of a second. Each direction runs for its warm-up plus its
+measurement duration. Settings cannot change during a run.
 
-Auto uses the first third of warm-up at the minimum connection count, the
-second third to probe the maximum, and the final third to settle at the
-selected count. If there are not enough throughput samples to show a gain,
-it keeps the minimum. Zero warm-up skips probing and immediately measures at
-the minimum. Set minimum and maximum to the same value for a fixed connection
-count. Single mode ignores the Auto connection settings.
+In Auto mode, the test measures the minimum connection count, probes the
+maximum, and keeps the maximum only when throughput improves by at least 8%.
+If there is not enough data to show an improvement, it keeps the minimum. A
+zero-second warm-up skips the comparison and uses the minimum. Set both counts
+to the same value to use a fixed number of connections.
 
-The upload repeats a reusable 32 MiB request body for as long as needed and
-aborts any in-flight request when its time expires. That chunk size does not
-set the test duration or impose a total transfer limit.
+Single connection mode ignores the Auto connection settings. Upload requests
+repeat until the configured time ends, and any request still running at the
+deadline is stopped.
 
-## Development checks
+## Reverse proxies
 
-Run the dependency-free timing and connection regression checks with Node.js:
+The app can start concurrent requests, but it cannot force a browser to open
+separate transport connections. HTTP/2 and HTTP/3 can carry concurrent requests
+over one connection. Use HTTP/1.1 for the speed-test hostname when Auto mode
+must measure separate TCP connections.
+
+The maximum is six connections to fit common HTTP/1.1 browser limits. The
+browser, operating system, and reverse proxy still control connection reuse.
+
+## Development
+
+Run the dependency-free regression tests with Node.js:
 
 ```sh
 node --test tests/speedtest.test.js
 ```
-
-## Reverse proxies
-
-The app cannot tell a browser to create a new transport connection. When a
-reverse proxy offers HTTP/2 or HTTP/3, concurrent test requests can share one
-connection. Configure the dedicated speed-test hostname for HTTP/1.1 if Auto
-mode must measure multiple independent TCP connections.
-
-The production Caddy route is configured to use HTTP/1.1. The page does not
-show a protocol result because this is a deployment setting rather than a
-speed-test result.
-
-Connection settings are limited to six to fit Chromium's default HTTP/1.1
-[per-host connection limit](https://github.com/chromium/chromium/blob/main/net/socket/client_socket_pool_manager.cc).
-The browser and proxy still control the actual transport connections.
